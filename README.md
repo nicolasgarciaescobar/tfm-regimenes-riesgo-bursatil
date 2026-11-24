@@ -3,10 +3,12 @@
 **Evaluación de modelos de aprendizaje automático no supervisado para la identificación de regímenes de riesgo en mercados bursátiles: un estudio de generalización entre empresas cotizadas**
 
 Trabajo Final de Máster · Máster en Ciencia de Datos e Inteligencia Artificial · EBIS Business Techschool
+
 Autor: Nicolás García Escobar · Noviembre de 2026
 
 **Cuadro de mando interactivo:** https://nicolasgarciaescobar.github.io/tfm-regimenes-riesgo-bursatil/
-(Versión sin conexión: [`respaldo_cuadro_de_mando.pdf`](respaldo_cuadro_de_mando.pdf))
+
+Versión sin conexión: [`respaldo_cuadro_de_mando.pdf`](respaldo_cuadro_de_mando.pdf)
 
 ## Pregunta de investigación
 
@@ -36,7 +38,33 @@ Para medir la generalización, las empresas se dividieron en un grupo de entrena
 | `docs/` | Cuadro de mando publicado con GitHub Pages (`index.html`), sus tablas de datos (`docs/datos/`) y la librería D3.js (`docs/lib/`) |
 | `resultados/figuras/` | Las seis figuras del documento |
 | `respaldo_cuadro_de_mando.pdf` | Vista inicial del cuadro de mando en PDF |
-| `cuadernos/` | Cuadernos de Google Colab de las 23 actividades (se añaden en el siguiente paso) |
+| `cuadernos/` | Cuadernos de Google Colab de las 23 actividades, con sus resultados |
+
+## Cuadernos
+
+El trabajo se desarrolló en 23 actividades. Las actividades 1 a 7 están en un mismo cuaderno; cada una de las demás tiene el suyo.
+
+| Actividad | Cuaderno | Contenido |
+|---|---|---|
+| 1–7 | `01_inventario_repositorio` | Inventario y versión del repositorio, calidad, calendario, directorio de Nasdaq y prueba con la SEC |
+| 8 | `08_consulta_sec` | Régimen de información de cada empresa en la SEC |
+| 9 | `09_clasificacion_final` | Clasificación definitiva de los instrumentos |
+| 10 | `10_consolidacion` | Descarga del universo y consolidación |
+| 11 | `11_metricas_seleccion` | Validez de los datos y métricas de selección |
+| 12 | `12_filtros_saltos` | Criterio de liquidez y saltos extremos |
+| 13 | `13_detalle_saltos` | Revisión detallada de los saltos |
+| 14 | `14_muestra_separacion` | Muestra definitiva y separación de empresas |
+| 15 | `15_variables` | Cálculo de las variables de riesgo |
+| 16 | `16_preprocesamiento` | Recorte de extremos y escalado |
+| 17 | `17_eleccion_k` | Métricas para elegir el número de regímenes |
+| 18 | `18_perfiles_candidatos` | Perfiles con tres y seis grupos |
+| 19 | `19_modelo_definitivo` | Modelo definitivo |
+| 20 | `20_metricas_generalizacion` | Métricas de generalización |
+| 21 | `21_gaussian_mixture` | Mezcla de gaussianas |
+| 22 | `22_diagnostico_gmm` | Diagnóstico de las diferencias entre algoritmos |
+| 23 | `23_figuras_tablas` | Figuras y tablas de resultados |
+
+Los cuadernos conservan las salidas de su ejecución. Antes de publicarlos se retiraron el correo de contacto usado con la SEC y una vista de ejemplo con precios originales.
 
 ## Datos
 
