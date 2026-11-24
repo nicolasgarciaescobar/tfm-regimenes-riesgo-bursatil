@@ -1,0 +1,873 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Regímenes de riesgo bursátil · TFM</title>
+<meta name="description" content="Cuadro de mando del Trabajo Final de Máster de Nicolás García Escobar (EBIS Business Techschool): regímenes de riesgo en acciones de EE. UU. identificados con K-Means.">
+<style>
+  :root {
+    --color-fg: #1f1f1f; --color-fg-muted: #5c5c58; --color-bg: #fbfaf8; --color-panel: #ffffff; --color-border-line: #e2dfd8;
+    --font-anthropic-sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    --font-anthropic-serif: Cambria, Georgia, "Times New Roman", serif;
+    --cds-font-size-caption: 0.8125rem; --cds-font-size-body: 0.9375rem; --cds-font-size-heading: 1.25rem; --cds-font-size-title: 2rem;
+    --cds-font-weight-medium: 600;
+    --cds-gap-xs: 4px; --cds-gap-sm: 8px; --cds-gap-md: 16px; --cds-gap-lg: 24px; --cds-gap-xl: 40px;
+    --cds-pad-lg: 20px; --cds-radius: 8px;
+    --cds-chart-muted: #bdb9b0; --cds-chart-grid: #e9e6e0; --cds-chart-axis: #c8c4bb; --cds-text-secondary: #5c5c58;
+    --cds-surface-popover: #ffffff; --cds-border: #d9d5cd; --cds-shadow-popover: 0 6px 20px rgba(0,0,0,.12);
+    color-scheme: light dark;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --color-fg: #ecebe8; --color-fg-muted: #a8a69f; --color-bg: #1b1b1a; --color-panel: #242423; --color-border-line: #3a3936;
+      --cds-chart-muted: #5d5b56; --cds-chart-grid: #33322f; --cds-chart-axis: #4a4844; --cds-text-secondary: #a8a69f;
+      --cds-surface-popover: #2c2c2a; --cds-border: #45433f; --cds-shadow-popover: 0 6px 20px rgba(0,0,0,.5);
+    }
+  }
+  html { background: var(--color-bg); }
+  body { margin: 0; background: var(--color-bg); color: var(--color-fg); font-family: var(--font-anthropic-sans); font-size: var(--cds-font-size-body); }
+  #dash-root { max-width: 1180px; margin: 0 auto; padding: 32px 16px 48px; }
+  a { color: inherit; }
+  .dash-select { font: inherit; font-size: var(--cds-font-size-body); color: var(--color-fg); background-color: var(--color-panel);
+    border: 1px solid var(--color-border-line); border-radius: var(--cds-radius); padding: 6px 30px 6px 10px; max-width: 100%;
+    appearance: none; -webkit-appearance: none;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M1 1l4 4 4-4' stroke='%23888' stroke-width='1.5' fill='none'/%3E%3C/svg%3E");
+    background-repeat: no-repeat; background-position: right 10px center; }
+  @media print { .rr-controls, #mostrar-mas { display: none !important; } #dash-root { padding: 0; } details > dl { display: grid !important; } }
+</style>
+<script src="lib/d3.v7.min.js"></script>
+<script>
+  // Capa mínima que sustituye al entorno del tablero original: carga las tablas y redibuja.
+  (function () {
+    const FUENTES = {
+      diario: "datos/regimen_diario.csv", perfiles: "datos/perfiles_regimen.csv", empresas: "datos/empresas_regimen.csv",
+      seleccion_k: "datos/seleccion_k.csv", estabilidad: "datos/generalizacion_estabilidad.csv",
+      sincronia: "datos/generalizacion_sincronia.csv", kmeans_gmm: "datos/comparacion_kmeans_gmm.csv",
+      trimestral: "datos/regimenes_trimestrales.csv"
+    };
+    const INICIALES = { grupo_evol: "entrenamiento", periodo_perfil: "entrenamiento", grupo_perfil: "entrenamiento", periodo_emp: "prueba", sector: "", regimen_emp: "" };
+    const cache = {}, calcs = {}, dibujos = {}, alCambiar = [];
+    let params = { ...INICIALES }, estado = "loading";
+    function correr(nombre) {
+      const fn = dibujos[nombre]; if (!fn) return;
+      document.querySelectorAll('[data-draw="' + nombre + '"]').forEach((el) => { try { fn(el); } catch (e) { console.error(nombre, e); } });
+    }
+    function refrescar() { alCambiar.forEach((f) => { try { f(); } catch (e) { console.error(e); } }); Object.keys(dibujos).forEach(correr); }
+    window.dash = {
+      data(id) {
+        if (calcs[id]) {
+          if (estado !== "ok") return { status: estado, data: null };
+          const c = calcs[id];
+          try { return { status: "ok", data: c.fn(...c.inputs.map((i) => window.dash.data(i).data)) }; }
+          catch (e) { console.error(id, e); return { status: "error", data: null }; }
+        }
+        if (cache[id]) return { status: "ok", data: cache[id] };
+        return { status: estado === "ok" ? "error" : estado, data: [] };
+      },
+      calc(id, def) { calcs[id] = def; },
+      draw(nombre, fn) { if (fn) { dibujos[nombre] = fn; if (estado !== "loading") correr(nombre); } else correr(nombre); },
+      onData(fn) { alCambiar.push(fn); try { fn(); } catch (e) { console.error(e); } },
+      params() { return params; },
+      setParams(p) { params = { ...params, ...p }; refrescar(); },
+      resetParams() { params = { ...INICIALES }; refrescar(); },
+      setLink() {}, refresh() {}, colors: []
+    };
+    Promise.all(Object.entries(FUENTES).map(([id, url]) => d3.csv(url).then((filas) => { cache[id] = filas; })))
+      .then(() => { estado = "ok"; }, (e) => { console.error(e); estado = "error"; })
+      .then(() => { if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", refrescar); else refrescar(); });
+    let ancho = window.innerWidth;
+    window.addEventListener("resize", () => { if (window.innerWidth !== ancho) { ancho = window.innerWidth; refrescar(); } });
+  })();
+</script>
+</head>
+<body>
+<div id="dash-root">
+<style>
+  .rr { display: flex; flex-direction: column; gap: var(--cds-gap-xl); font-variant-numeric: tabular-nums; }
+  .rr h1 { font-family: var(--font-anthropic-serif); font-weight: 400; font-size: var(--cds-font-size-title); margin: 0; line-height: 1.2; }
+  .rr h2 { font-size: var(--cds-font-size-heading); font-weight: var(--cds-font-weight-medium); margin: 0 0 var(--cds-gap-xs); }
+  .rr h3 { font-size: var(--cds-font-size-body); font-weight: var(--cds-font-weight-medium); margin: 0; }
+  .rr p { margin: 0; line-height: 1.5; }
+  .rr-sub { color: var(--color-fg-muted); font-size: var(--cds-font-size-caption); margin-top: var(--cds-gap-xs) !important; }
+  .rr-lead { font-size: var(--cds-font-size-body); max-width: 62em; margin-top: var(--cds-gap-sm) !important; }
+  .rr-lead b, .rr-txt b { font-weight: var(--cds-font-weight-medium); }
+  .rr-muted { color: var(--color-fg-muted); font-size: var(--cds-font-size-caption); }
+  .rr-section { display: flex; flex-direction: column; gap: var(--cds-gap-md); }
+  .rr-intro { max-width: 62em; color: var(--color-fg-muted); }
+  .rr-card { background: var(--color-panel); border: 1px solid var(--color-border-line); border-radius: var(--cds-radius); padding: var(--cds-pad-lg); }
+  .rr-kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: var(--cds-gap-md); }
+  .rr-kpi .rr-label { color: var(--color-fg-muted); font-size: var(--cds-font-size-caption); }
+  .rr-kpi .rr-big { font-family: var(--font-anthropic-serif); font-weight: 400; font-size: 2.1rem; line-height: 1.15; margin: var(--cds-gap-xs) 0; display: block; }
+  .rr-controls { display: flex; flex-wrap: wrap; gap: var(--cds-gap-sm) var(--cds-gap-md); align-items: end; }
+  .rr-controls label { display: flex; flex-direction: column; gap: 4px; font-size: var(--cds-font-size-caption); color: var(--color-fg-muted); }
+  .rr-seg { display: inline-flex; border: 1px solid var(--color-border-line); border-radius: var(--cds-radius); overflow: hidden; }
+  .rr-seg button { font: inherit; font-size: var(--cds-font-size-caption); background: transparent; color: var(--color-fg-muted); border: 0; padding: 6px 12px; cursor: pointer; }
+  .rr-seg button + button { border-left: 1px solid var(--color-border-line); }
+  .rr-seg button[aria-pressed="true"] { background: var(--color-fg); color: var(--color-bg); }
+  .rr-input { font: inherit; font-size: var(--cds-font-size-body); padding: 6px 10px; border: 1px solid var(--color-border-line); border-radius: var(--cds-radius); background-color: var(--color-bg); color: var(--color-fg); width: 12em; }
+  .rr-legend { display: flex; flex-wrap: wrap; gap: var(--cds-gap-xs) var(--cds-gap-md); font-size: var(--cds-font-size-caption); color: var(--color-fg-muted); }
+  .rr-legend span { display: inline-flex; align-items: center; gap: 6px; }
+  .rr-sw { width: 12px; height: 12px; border-radius: 3px; display: inline-block; }
+  .rr-sw.line { height: 3px; border-radius: 2px; width: 16px; }
+  .rr-chart { position: relative; width: 100%; }
+  .rr-chart svg { display: block; overflow: visible; }
+  .rr-chart text { font-size: 11px; fill: var(--cds-text-secondary); }
+  .rr-chart .tick line { stroke: var(--cds-chart-grid); }
+  .rr-chart .domain { stroke: var(--cds-chart-axis); }
+  .rr-tip { position: absolute; pointer-events: none; background: var(--cds-surface-popover); border: 1px solid var(--cds-border); box-shadow: var(--cds-shadow-popover); border-radius: var(--cds-radius); padding: 8px 10px; font-size: var(--cds-font-size-caption); line-height: 1.45; white-space: nowrap; z-index: 5; }
+  .rr-tip .t { color: var(--cds-text-secondary); margin-bottom: 2px; }
+  .rr-tip .r { display: flex; align-items: center; gap: 6px; }
+  .rr-tip .r b { margin-left: auto; padding-left: 12px; font-weight: var(--cds-font-weight-medium); }
+  .rr-two { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: var(--cds-gap-md); }
+  .rr-perfiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: var(--cds-gap-md); }
+  .rr-reg { border-top: 4px solid; display: flex; flex-direction: column; gap: var(--cds-gap-sm); }
+  .rr-reg.calma { border-top-color: #2a78d6; } .rr-reg.impulso { border-top-color: #eda100; } .rr-reg.estres { border-top-color: #e34948; }
+  .rr-reg .rr-share { font-family: var(--font-anthropic-serif); font-size: 1.7rem; font-weight: 400; }
+  .rr-reg dl { display: grid; grid-template-columns: 1fr auto; gap: 6px var(--cds-gap-md); margin: 0; font-size: var(--cds-font-size-caption); }
+  .rr-reg dt { color: var(--color-fg-muted); } .rr-reg dd { margin: 0; text-align: right; font-weight: var(--cds-font-weight-medium); }
+  .rr-tablewrap { overflow-x: auto; }
+  .rr-table { border-collapse: collapse; width: 100%; font-size: var(--cds-font-size-caption); }
+  .rr-table th, .rr-table td { padding: 7px 10px; text-align: left; border-bottom: 1px solid var(--color-border-line); white-space: nowrap; }
+  .rr-table th { color: var(--color-fg-muted); font-weight: var(--cds-font-weight-medium); }
+  .rr-table .n { text-align: right; }
+  .rr-table th.sortable { cursor: pointer; user-select: none; }
+  .rr-table th[aria-sort="descending"]::after { content: " ↓"; } .rr-table th[aria-sort="ascending"]::after { content: " ↑"; }
+  .rr-mini { display: flex; width: 120px; height: 10px; border-radius: 3px; overflow: hidden; gap: 1px; background: var(--color-bg); }
+  .rr-btn { font: inherit; font-size: var(--cds-font-size-caption); padding: 6px 14px; border: 1px solid var(--color-border-line); border-radius: var(--cds-radius); background: transparent; color: var(--color-fg); cursor: pointer; align-self: flex-start; }
+  .rr details { border-top: 1px solid var(--color-border-line); padding-top: var(--cds-gap-md); }
+  .rr summary { cursor: pointer; font-weight: var(--cds-font-weight-medium); }
+  .rr details dl { display: grid; grid-template-columns: minmax(130px, 220px) 1fr; gap: var(--cds-gap-sm) var(--cds-gap-md); margin: var(--cds-gap-md) 0 0; font-size: var(--cds-font-size-caption); line-height: 1.5; }
+  .rr details dt { font-weight: var(--cds-font-weight-medium); } .rr details dd { margin: 0; color: var(--color-fg-muted); }
+  @media (max-width: 520px) { .rr details dl { grid-template-columns: 1fr; } .rr details dd { margin-bottom: var(--cds-gap-xs); } }
+  .rr-foot { color: var(--color-fg-muted); font-size: var(--cds-font-size-caption); line-height: 1.5; }
+</style>
+
+<div class="rr" data-read lang="es">
+
+  <header id="cabecera">
+    <h1>Regímenes de riesgo en la bolsa de EE. UU.</h1>
+    <p class="rr-sub">Trabajo Final de Máster · Nicolás García Escobar · EBIS Business Techschool · K-Means con tres regímenes · <a href="https://github.com/nicolasgarciaescobar/tfm-regimenes-riesgo-bursatil">Código en GitHub</a></p>
+    <p class="rr-lead">El modelo agrupa cada día de cada acción en tres estados de riesgo y los reconoce casi igual en empresas que nunca vio (coincidencia de <b data-draw="valor" data-source="estabilidad" data-field="ari" data-where="celda=reservada / entrenamiento" data-fmt="dec2">—</b> frente a <b data-draw="valor" data-source="estabilidad" data-field="ari" data-where="celda=entrenamiento / entrenamiento" data-fmt="dec2">—</b> en las que aprendió). En años posteriores la coincidencia baja a <b data-draw="valor" data-source="estabilidad" data-field="ari" data-where="celda=entrenamiento / prueba" data-fmt="dec2">—</b>–<b data-draw="valor" data-source="estabilidad" data-field="ari" data-where="celda=reservada / validacion" data-fmt="dec2">—</b>, pero los dos grupos de empresas entran y salen del estrés al mismo tiempo (correlación diaria de <b data-draw="valor" data-source="sinc_rango" data-field="min" data-row="0" data-fmt="dec2">—</b> a <b data-draw="valor" data-source="sinc_rango" data-field="max" data-row="0" data-fmt="dec2">—</b>).</p>
+  </header>
+
+  <section id="cifras" class="rr-kpis" aria-label="Cifras clave">
+    <div class="rr-card rr-kpi" id="kpi-empresas">
+      <div class="rr-label">Empresas analizadas</div>
+      <span class="rr-big dash-skeleton" data-draw="valor" data-source="resumen" data-field="empresas" data-row="0" data-fmt="int">—</span>
+      <div class="rr-muted"><span data-draw="valor" data-source="resumen" data-field="empresas_ent" data-row="0" data-fmt="int">—</span> entrenan el modelo y <span data-draw="valor" data-source="resumen" data-field="empresas_res" data-row="0" data-fmt="int">—</span> se reservan para probarlo</div>
+    </div>
+    <div class="rr-card rr-kpi" id="kpi-observaciones">
+      <div class="rr-label">Observaciones empresa-día</div>
+      <span class="rr-big dash-skeleton" data-draw="valor" data-source="resumen" data-field="observaciones" data-row="0" data-fmt="int">—</span>
+      <div class="rr-muted">Sesiones de <span data-draw="valor" data-source="resumen" data-field="desde" data-row="0" data-fmt="mes">—</span> a <span data-draw="valor" data-source="resumen" data-field="hasta" data-row="0" data-fmt="mes">—</span></div>
+    </div>
+    <div class="rr-card rr-kpi" id="kpi-empresas-nuevas">
+      <div class="rr-label">Coincidencia en empresas nuevas</div>
+      <span class="rr-big dash-skeleton" data-draw="valor" data-source="estabilidad" data-field="ari" data-where="celda=reservada / entrenamiento" data-fmt="dec2">—</span>
+      <div class="rr-muted">ARI, mismo periodo 2020–2022 · 1 = mismos grupos, 0 = al azar</div>
+    </div>
+    <div class="rr-card rr-kpi" id="kpi-todo-nuevo">
+      <div class="rr-label">Coincidencia con empresas y años nuevos</div>
+      <span class="rr-big dash-skeleton" data-draw="valor" data-source="estabilidad" data-field="ari" data-where="celda=reservada / prueba" data-fmt="dec2">—</span>
+      <div class="rr-muted">ARI, empresas reservadas en 2025–2026, la prueba más exigente</div>
+    </div>
+  </section>
+
+  <section id="regimenes" class="rr-section">
+    <div>
+      <h2>Los tres regímenes</h2>
+      <p class="rr-intro">Cada régimen es el perfil típico de una acción en un día dado, según cinco variables de riesgo. Los valores son la mediana de cada régimen.</p>
+    </div>
+    <div class="rr-controls">
+      <label>Periodo
+        <select class="dash-select" data-param="periodo_perfil" aria-label="Periodo de los perfiles">
+          <option value="entrenamiento">2020–2022 (entrenamiento)</option>
+          <option value="validacion">2023–2024 (validación)</option>
+          <option value="prueba">2025–2026 (prueba)</option>
+        </select>
+      </label>
+      <label>Empresas
+        <select class="dash-select" data-param="grupo_perfil" aria-label="Grupo de empresas de los perfiles">
+          <option value="entrenamiento">De entrenamiento</option>
+          <option value="reservada">Reservadas</option>
+        </select>
+      </label>
+    </div>
+    <div class="rr-perfiles" data-source="perfil_legible">
+      <div class="rr-card rr-reg calma" id="perfil-calma">
+        <h3>Calma</h3>
+        <p class="rr-muted">Volatilidad baja y descendente, sin tendencia, cerca del máximo y con poca negociación. Riesgo bajo.</p>
+        <div><span class="rr-share" data-draw="valor" data-source="perfil_legible" data-field="tiempo" data-where="regimen=Calma" data-fmt="pct1">—</span> <span class="rr-muted">de las observaciones</span></div>
+        <dl>
+          <dt>Volatilidad anual</dt><dd data-draw="valor" data-source="perfil_legible" data-field="volatilidad" data-where="regimen=Calma" data-fmt="pct1">—</dd>
+          <dt>Volatilidad frente al trimestre</dt><dd data-draw="valor" data-source="perfil_legible" data-field="cambio_volatilidad" data-where="regimen=Calma" data-fmt="spct1">—</dd>
+          <dt>Rendimiento del último mes</dt><dd data-draw="valor" data-source="perfil_legible" data-field="rendimiento" data-where="regimen=Calma" data-fmt="spct1">—</dd>
+          <dt>Caída desde el máximo</dt><dd data-draw="valor" data-source="perfil_legible" data-field="caida" data-where="regimen=Calma" data-fmt="spct1">—</dd>
+          <dt>Volumen frente al habitual</dt><dd data-draw="valor" data-source="perfil_legible" data-field="volumen" data-where="regimen=Calma" data-fmt="spct1">—</dd>
+        </dl>
+      </div>
+      <div class="rr-card rr-reg impulso" id="perfil-impulso">
+        <h3>Impulso</h3>
+        <p class="rr-muted">Volatilidad media y en aumento, precio subiendo cerca del máximo y negociación muy alta. Riesgo moderado ligado a subidas.</p>
+        <div><span class="rr-share" data-draw="valor" data-source="perfil_legible" data-field="tiempo" data-where="regimen=Impulso" data-fmt="pct1">—</span> <span class="rr-muted">de las observaciones</span></div>
+        <dl>
+          <dt>Volatilidad anual</dt><dd data-draw="valor" data-source="perfil_legible" data-field="volatilidad" data-where="regimen=Impulso" data-fmt="pct1">—</dd>
+          <dt>Volatilidad frente al trimestre</dt><dd data-draw="valor" data-source="perfil_legible" data-field="cambio_volatilidad" data-where="regimen=Impulso" data-fmt="spct1">—</dd>
+          <dt>Rendimiento del último mes</dt><dd data-draw="valor" data-source="perfil_legible" data-field="rendimiento" data-where="regimen=Impulso" data-fmt="spct1">—</dd>
+          <dt>Caída desde el máximo</dt><dd data-draw="valor" data-source="perfil_legible" data-field="caida" data-where="regimen=Impulso" data-fmt="spct1">—</dd>
+          <dt>Volumen frente al habitual</dt><dd data-draw="valor" data-source="perfil_legible" data-field="volumen" data-where="regimen=Impulso" data-fmt="spct1">—</dd>
+        </dl>
+      </div>
+      <div class="rr-card rr-reg estres" id="perfil-estres">
+        <h3>Estrés</h3>
+        <p class="rr-muted">Volatilidad muy alta, pérdidas fuertes en el mes y caída profunda desde el máximo. Riesgo alto.</p>
+        <div><span class="rr-share" data-draw="valor" data-source="perfil_legible" data-field="tiempo" data-where="regimen=Estrés" data-fmt="pct1">—</span> <span class="rr-muted">de las observaciones</span></div>
+        <dl>
+          <dt>Volatilidad anual</dt><dd data-draw="valor" data-source="perfil_legible" data-field="volatilidad" data-where="regimen=Estrés" data-fmt="pct1">—</dd>
+          <dt>Volatilidad frente al trimestre</dt><dd data-draw="valor" data-source="perfil_legible" data-field="cambio_volatilidad" data-where="regimen=Estrés" data-fmt="spct1">—</dd>
+          <dt>Rendimiento del último mes</dt><dd data-draw="valor" data-source="perfil_legible" data-field="rendimiento" data-where="regimen=Estrés" data-fmt="spct1">—</dd>
+          <dt>Caída desde el máximo</dt><dd data-draw="valor" data-source="perfil_legible" data-field="caida" data-where="regimen=Estrés" data-fmt="spct1">—</dd>
+          <dt>Volumen frente al habitual</dt><dd data-draw="valor" data-source="perfil_legible" data-field="volumen" data-where="regimen=Estrés" data-fmt="spct1">—</dd>
+        </dl>
+      </div>
+    </div>
+  </section>
+
+  <section id="evolucion" class="rr-section">
+    <div>
+      <h2>¿Qué parte del mercado estuvo en cada régimen?</h2>
+      <p class="rr-intro">Porcentaje de acciones en cada régimen, sesión a sesión. Los huecos entre periodos son las primeras 63 sesiones de cada uno, que solo sirven para calcular las variables.</p>
+    </div>
+    <div class="rr-controls">
+      <div class="rr-seg" role="group" aria-label="Grupo de empresas">
+        <button type="button" data-param-btn="grupo_evol" data-value="entrenamiento" aria-pressed="true">Empresas de entrenamiento</button>
+        <button type="button" data-param-btn="grupo_evol" data-value="reservada" aria-pressed="false">Empresas reservadas</button>
+      </div>
+      <div class="rr-legend">
+        <span><i class="rr-sw" style="background:#e34948"></i>Estrés</span>
+        <span><i class="rr-sw" style="background:#eda100"></i>Impulso</span>
+        <span><i class="rr-sw" style="background:#2a78d6"></i>Calma</span>
+      </div>
+    </div>
+    <div class="rr-chart" id="grafico-evolucion" data-draw="evol" data-source="diario" style="min-height:300px">—</div>
+    <h3>Trimestre con más estrés en cada periodo</h3>
+    <div class="rr-tablewrap">
+      <table class="rr-table" id="tabla-picos" data-source="picos" data-row-key="bloque">
+        <thead><tr><th data-field="bloque">Periodo</th><th data-field="trimestre">Trimestre</th><th class="n" data-field="estres_ent">Estrés, empresas de entrenamiento</th><th class="n" data-field="estres_res">Estrés, empresas reservadas</th></tr></thead>
+        <tbody data-draw="picos_tabla"></tbody>
+      </table>
+    </div>
+    <p class="rr-muted">Porcentaje medio de acciones en Estrés durante el trimestre. El pico de 2025 coincide con la caída del mercado por los aranceles anunciados en abril de ese año.</p>
+  </section>
+
+  <section id="generalizacion" class="rr-section">
+    <div>
+      <h2>¿El modelo sirve para empresas y años que no vio?</h2>
+      <p class="rr-intro">Para cada combinación se volvió a entrenar K-Means solo con esos datos y se comparó con los regímenes del modelo original. La coincidencia se mide con el ARI: 1 significa los mismos grupos y 0, grupos al azar.</p>
+    </div>
+    <div class="rr-two">
+      <div class="rr-card" id="ari-celdas">
+        <h3>Coincidencia (ARI) por periodo y grupo de empresas</h3>
+        <div class="rr-legend" style="margin:8px 0">
+          <span><i class="rr-sw" style="background:#1F7DB5"></i>Empresas de entrenamiento</span>
+          <span><i class="rr-sw" style="background:#5BB8E3"></i>Empresas reservadas</span>
+        </div>
+        <div class="rr-chart" data-draw="ari_barras" data-source="estabilidad" style="min-height:220px">—</div>
+        <p class="rr-muted">La barra de entrenamiento en 2020–2022 compara el modelo consigo mismo y sirve de referencia.</p>
+      </div>
+      <div class="rr-card" id="sincronia">
+        <h3>Acciones en Estrés: los dos grupos a la vez</h3>
+        <div class="rr-legend" style="margin:8px 0">
+          <span><i class="rr-sw line" style="background:#1F7DB5"></i>Empresas de entrenamiento</span>
+          <span><i class="rr-sw line" style="background:#5BB8E3"></i>Empresas reservadas</span>
+        </div>
+        <div class="rr-chart" data-draw="sinc_lineas" data-source="diario" style="min-height:220px">—</div>
+        <p class="rr-muted">Si el modelo solo funcionara con las empresas con las que aprendió, las dos líneas se separarían.</p>
+      </div>
+    </div>
+    <h3>Correlación diaria entre los dos grupos de empresas</h3>
+    <div class="rr-tablewrap">
+      <table class="rr-table" id="tabla-sincronia" data-source="sincronia">
+        <thead><tr><th>Régimen</th><th class="n">2020–2022</th><th class="n">2023–2024</th><th class="n">2025–2026</th></tr></thead>
+        <tbody data-draw="sinc_tabla"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section id="empresas" class="rr-section">
+    <div>
+      <h2>Explorador de empresas</h2>
+      <p class="rr-intro">Porcentaje de sesiones que cada empresa pasó en cada régimen. Ordena con un clic en las columnas.</p>
+    </div>
+    <div class="rr-controls">
+      <label>Buscar empresa
+        <input type="search" class="rr-input" id="buscar-ticker" placeholder="Ticker, p. ej. AAPL" aria-label="Buscar empresa por ticker" autocomplete="off">
+      </label>
+      <label>Periodo
+        <select class="dash-select" data-param="periodo_emp" aria-label="Periodo del explorador">
+          <option value="entrenamiento">2020–2022 (entrenamiento)</option>
+          <option value="validacion">2023–2024 (validación)</option>
+          <option value="prueba">2025–2026 (prueba)</option>
+        </select>
+      </label>
+      <label>Sector
+        <select class="dash-select" data-draw="sector" data-source="empresas" aria-label="Sector"></select>
+      </label>
+      <label>Régimen predominante
+        <select class="dash-select" data-param="regimen_emp" aria-label="Régimen predominante">
+          <option value="">Todos</option>
+          <option value="Calma">Calma</option>
+          <option value="Impulso">Impulso</option>
+          <option value="Estrés">Estrés</option>
+        </select>
+      </label>
+    </div>
+    <p class="rr-txt">En el periodo elegido, el régimen predominante fue Calma en <b data-draw="valor" data-source="predominio" data-field="empresas" data-where="regimen=Calma" data-fmt="int">—</b> empresas, Impulso en <b data-draw="valor" data-source="predominio" data-field="empresas" data-where="regimen=Impulso" data-fmt="int">—</b> y Estrés en <b data-draw="valor" data-source="predominio" data-field="empresas" data-where="regimen=Estrés" data-fmt="int">—</b>.</p>
+    <div class="rr-tablewrap">
+      <table class="rr-table" id="tabla-empresas" data-source="empresas" data-row-key="ticker,bloque">
+        <thead><tr>
+          <th class="sortable" data-sort="ticker" data-field="ticker">Empresa</th>
+          <th class="sortable" data-sort="division_sic" data-field="division_sic">Sector</th>
+          <th class="sortable" data-sort="grupo" data-field="grupo">Grupo</th>
+          <th class="n sortable" data-sort="pct_Calma" data-field="pct_Calma">Calma</th>
+          <th class="n sortable" data-sort="pct_Impulso" data-field="pct_Impulso">Impulso</th>
+          <th class="n sortable" data-sort="pct_Estres" data-field="pct_Estres" aria-sort="descending">Estrés</th>
+          <th>Reparto</th>
+          <th data-field="regimen_predominante">Predominante</th>
+        </tr></thead>
+        <tbody data-draw="emp_tabla"></tbody>
+      </table>
+    </div>
+    <p class="rr-muted" data-draw="emp_conteo">—</p>
+    <button type="button" class="rr-btn" id="mostrar-mas">Mostrar 20 más</button>
+  </section>
+
+  <section id="modelo" class="rr-section">
+    <div>
+      <h2>¿Por qué tres regímenes y por qué K-Means?</h2>
+      <p class="rr-intro">Con 2 grupos los datos se separan mejor (silueta de <b data-draw="valor" data-source="seleccion_k" data-field="silueta_ent" data-where="k=2" data-fmt="dec2">—</b>), pero los grupos cambian casi por completo de un periodo a otro (ARI de <b data-draw="valor" data-source="seleccion_k" data-field="ari_ent_vs_val" data-where="k=2" data-fmt="dec2">—</b>). Con 3 la estabilidad sube a <b data-draw="valor" data-source="seleccion_k" data-field="ari_ent_vs_val" data-where="k=3" data-fmt="dec2">—</b> y cada régimen tiene una lectura financiera clara.</p>
+    </div>
+    <div class="rr-two">
+      <div class="rr-card" id="k-silueta">
+        <h3>Separación de los grupos (silueta)</h3>
+        <p class="rr-muted">Entrenamiento 2020–2022. Más alto, grupos más separados.</p>
+        <div class="rr-chart" data-draw="k_barras" data-source="seleccion_k" data-campo="silueta_ent" style="min-height:190px">—</div>
+      </div>
+      <div class="rr-card" id="k-ari">
+        <h3>Estabilidad entre periodos (ARI)</h3>
+        <p class="rr-muted">Entrenamiento frente a validación. Más alto, grupos que se repiten.</p>
+        <div class="rr-chart" data-draw="k_barras" data-source="seleccion_k" data-campo="ari_ent_vs_val" style="min-height:190px">—</div>
+      </div>
+    </div>
+    <p class="rr-txt" id="gmm">Como contraste se probó Gaussian Mixture con tres componentes. Coincide con los regímenes de K-Means solo en el <b data-draw="valor" data-source="gmm_rango" data-field="acuerdo_min" data-row="0" data-fmt="pct0">—</b>–<b data-draw="valor" data-source="gmm_rango" data-field="acuerdo_max" data-row="0" data-fmt="pct0">—</b> de las observaciones (ARI de <b data-draw="valor" data-source="gmm_rango" data-field="ari_min" data-row="0" data-fmt="dec2">—</b> a <b data-draw="valor" data-source="gmm_rango" data-field="ari_max" data-row="0" data-fmt="dec2">—</b>). Sus componentes ordenan por volatilidad pero mezclan subidas y caídas, por eso el trabajo mantiene K-Means y solo usa los nombres Calma, Impulso y Estrés para K-Means.</p>
+  </section>
+
+  <details id="definiciones">
+    <summary>Definiciones y método</summary>
+    <dl>
+      <dt>Régimen</dt><dd>Estado de riesgo de una acción en un día. K-Means agrupa los días con un perfil parecido y los grupos se nombran según su volatilidad: Calma, Impulso y Estrés.</dd>
+      <dt>Empresas de entrenamiento y reservadas</dt><dd>De las <span data-draw="valor" data-source="resumen" data-field="empresas" data-row="0" data-fmt="int">—</span> empresas, el 70 % se usó para entrenar el modelo y el 30 % se apartó para comprobar si funciona con empresas que no vio. El reparto se hizo por sorteo dentro de grupos de liquidez y volatilidad.</dd>
+      <dt>Periodos</dt><dd>Entrenamiento hasta diciembre de 2022, validación 2023–2024 y prueba de enero de 2025 a agosto de 2026. El modelo y sus ajustes solo ven el periodo de entrenamiento.</dd>
+      <dt>Variables</dt><dd>Volatilidad de 21 sesiones (anualizada), cambio de volatilidad frente a 63 sesiones, rendimiento de 21 sesiones, caída desde el máximo de 63 sesiones y volumen negociado frente al habitual. Los valores extremos se recortan en los percentiles 1 y 99 y se estandarizan, sin borrar datos.</dd>
+      <dt>ARI</dt><dd>Índice de Rand ajustado. Compara dos clasificaciones de las mismas observaciones: 1 si son idénticas, 0 si coinciden como al azar.</dd>
+      <dt>Silueta</dt><dd>Mide qué tan separado está cada grupo de los demás, de −1 a 1. Más alto es mejor.</dd>
+      <dt>Correlación diaria</dt><dd>Compara, día a día, el porcentaje de acciones en un régimen entre los dos grupos de empresas. Cerca de 1 significa que se mueven a la vez.</dd>
+    </dl>
+  </details>
+
+  <p class="rr-foot">Fuente: Yahoo Finance, repositorio AmirTrader/YahooFinance en Hugging Face (versión del 4 de noviembre de 2026). Las cifras son resultados derivados, calculados en Google Colab durante el TFM; el cuadro de mando no incluye precios. Las tablas que usa están en la carpeta <a href="https://github.com/nicolasgarciaescobar/tfm-regimenes-riesgo-bursatil/tree/main/docs/datos">docs/datos</a> del <a href="https://github.com/nicolasgarciaescobar/tfm-regimenes-riesgo-bursatil">repositorio del trabajo</a>.</p>
+</div>
+
+<script>
+  // ---------- Formatos en español ----------
+  const LOC = d3.formatLocale({ decimal: ",", thousands: ".", grouping: [3], currency: ["", " €"], minus: "−" });
+  const TLOC = d3.timeFormatLocale({
+    dateTime: "%e de %B de %Y", date: "%d/%m/%Y", time: "%H:%M", periods: ["", ""],
+    days: ["domingo", "lunes", "martes", "miércoles", "jueves", "viernes", "sábado"],
+    shortDays: ["dom", "lun", "mar", "mié", "jue", "vie", "sáb"],
+    months: ["enero", "febrero", "marzo", "abril", "mayo", "junio", "julio", "agosto", "septiembre", "octubre", "noviembre", "diciembre"],
+    shortMonths: ["ene", "feb", "mar", "abr", "may", "jun", "jul", "ago", "sep", "oct", "nov", "dic"]
+  });
+  window.rr = {
+    colores: { "Calma": "#2a78d6", "Impulso": "#eda100", "Estrés": "#e34948" },
+    grupos: { entrenamiento: "#1F7DB5", reservada: "#5BB8E3" },
+    nombresGrupo: { entrenamiento: "Empresas de entrenamiento", reservada: "Empresas reservadas" },
+    nombresBloque: { entrenamiento: "2020–2022 (entrenamiento)", validacion: "2023–2024 (validación)", prueba: "2025–2026 (prueba)" },
+    bloquesCortos: { entrenamiento: "Entrenamiento", validacion: "Validación", prueba: "Prueba" },
+    bloques: ["entrenamiento", "validacion", "prueba"],
+    parse: d3.utcParse("%Y-%m-%d"),
+    fDia: TLOC.utcFormat("%e %b %Y"),
+    fMes: TLOC.utcFormat("%b %Y"),
+    fAnio: TLOC.utcFormat("%Y"),
+    fmt: {
+      dec2: (v) => LOC.format(".2f")(v),
+      int: (v) => Math.abs(v) < 10000 ? LOC.format("d")(v) : LOC.format(",d")(v),
+      pct0: (v) => LOC.format(".0f")(v) + " %",
+      pct1: (v) => LOC.format(".1f")(v) + " %",
+      spct1: (v) => (v > 0.05 ? "+" : "") + LOC.format(".1f")(v) + " %",
+      num1: (v) => LOC.format(".1f")(v)
+    },
+    coincide(row, where) {
+      if (!where) return true;
+      return where.split("&").every((p) => {
+        const i = p.indexOf("=");
+        return String(row[decodeURIComponent(p.slice(0, i))]) === decodeURIComponent(p.slice(i + 1));
+      });
+    },
+    tip(box) {
+      const t = document.createElement("div");
+      t.className = "rr-tip"; t.hidden = true; box.appendChild(t);
+      return t;
+    },
+    filaTip(t, color, nombre, valor, linea) {
+      const r = document.createElement("div"); r.className = "r";
+      const s = document.createElement("i"); s.className = "rr-sw" + (linea ? " line" : ""); s.style.background = color;
+      const n = document.createElement("span"); n.textContent = nombre;
+      const b = document.createElement("b"); b.textContent = valor;
+      r.append(s, n, b); t.appendChild(r);
+    },
+    ponerTip(t, box, x, y) {
+      t.hidden = false;
+      const w = t.offsetWidth, bw = box.clientWidth;
+      let left = x + 14; if (left + w > bw) left = Math.max(0, x - w - 14);
+      t.style.left = left + "px"; t.style.top = Math.max(0, y - 10) + "px";
+    }
+  };
+
+  // ---------- Cálculos ----------
+  dash.calc("resumen", {
+    title: "Resumen de la muestra",
+    description: "Empresas distintas, reparto entre grupos, observaciones totales y fechas extremas.",
+    inputs: ["empresas", "perfiles", "diario"],
+    fn: (empresas, perfiles, diario) => {
+      const ent = new Set(), res = new Set();
+      for (const r of empresas) (r.grupo === "reservada" ? res : ent).add(r.ticker);
+      const fechas = diario.map((r) => r.fecha).sort();
+      return [{
+        empresas: new Set(empresas.map((r) => r.ticker)).size,
+        empresas_ent: ent.size,
+        empresas_res: res.size,
+        observaciones: d3.sum(perfiles, (r) => +r.filas),
+        desde: fechas[0],
+        hasta: fechas[fechas.length - 1]
+      }];
+    }
+  });
+
+  dash.calc("perfil_legible", {
+    title: "Perfil de cada régimen en porcentaje",
+    description: "Medianas de las cinco variables del periodo y grupo elegidos, pasados a porcentaje: volatilidad y caída por 100; cambio de volatilidad, rendimiento y volumen, que están en logaritmos, como exp(x) − 1.",
+    inputs: ["perfiles"],
+    fn: (perfiles) => {
+      const p = dash.params();
+      const bloque = p.periodo_perfil || "entrenamiento", grupo = p.grupo_perfil || "entrenamiento";
+      return perfiles.filter((r) => r.bloque === bloque && r.grupo === grupo).map((r) => ({
+        regimen: r.regimen,
+        tiempo: +r.pct_filas,
+        volatilidad: +r.volatilidad_21 * 100,
+        cambio_volatilidad: (Math.exp(+r.cambio_volatilidad) - 1) * 100,
+        rendimiento: (Math.exp(+r.rendimiento_21) - 1) * 100,
+        caida: +r.caida_maximo_63 * 100,
+        volumen: (Math.exp(+r.volumen_anormal) - 1) * 100
+      }));
+    }
+  });
+
+  dash.calc("picos", {
+    title: "Trimestre con más estrés por periodo",
+    description: "Para cada periodo, el trimestre con mayor porcentaje medio de empresas de entrenamiento en Estrés.",
+    inputs: ["trimestral"],
+    fn: (trimestral) => {
+      const bloqueDe = (t) => { const a = +String(t).slice(0, 4); return a <= 2022 ? "entrenamiento" : a <= 2024 ? "validacion" : "prueba"; };
+      return ["entrenamiento", "validacion", "prueba"].map((b) => {
+        const filas = trimestral.filter((r) => bloqueDe(r.date) === b);
+        const top = d3.greatest(filas, (r) => +r["Estrés_ent"]);
+        return top ? { bloque: b, trimestre: top.date, estres_ent: +top["Estrés_ent"], estres_res: +top["Estrés_res"] } : null;
+      }).filter(Boolean);
+    }
+  });
+
+  dash.calc("sinc_rango", {
+    title: "Rango de la correlación entre grupos",
+    description: "Mínimo y máximo de la correlación diaria entre empresas de entrenamiento y reservadas, en todos los regímenes y periodos.",
+    inputs: ["sincronia"],
+    fn: (sincronia) => [{ min: d3.min(sincronia, (r) => +r.correlacion), max: d3.max(sincronia, (r) => +r.correlacion) }]
+  });
+
+  dash.calc("gmm_rango", {
+    title: "Coincidencia entre K-Means y Gaussian Mixture",
+    description: "Mínimo y máximo, en las seis combinaciones de grupo y periodo, del acuerdo y del ARI entre K-Means y Gaussian Mixture.",
+    inputs: ["kmeans_gmm"],
+    fn: (kmeans_gmm) => [{
+      acuerdo_min: d3.min(kmeans_gmm, (r) => +r.acuerdo_pct),
+      acuerdo_max: d3.max(kmeans_gmm, (r) => +r.acuerdo_pct),
+      ari_min: d3.min(kmeans_gmm, (r) => +r.ari_kmeans_vs_gmm),
+      ari_max: d3.max(kmeans_gmm, (r) => +r.ari_kmeans_vs_gmm)
+    }]
+  });
+
+  dash.calc("predominio", {
+    title: "Empresas por régimen predominante",
+    description: "Número de empresas cuyo régimen más frecuente fue cada uno, en el periodo y sector elegidos.",
+    inputs: ["empresas"],
+    fn: (empresas) => {
+      const p = dash.params();
+      const bloque = p.periodo_emp || "prueba", sector = p.sector || "";
+      const filas = empresas.filter((r) => r.bloque === bloque && (!sector || r.division_sic === sector));
+      return ["Calma", "Impulso", "Estrés"].map((g) => ({ regimen: g, empresas: filas.filter((r) => r.regimen_predominante === g).length }));
+    }
+  });
+</script>
+
+<script>
+  // ---------- Valores sueltos ----------
+  dash.draw("valor", (el) => {
+    const d = dash.data(el.dataset.source);
+    if (d.status !== "ok" || !Array.isArray(d.data)) {
+      el.textContent = "—";
+      if (d.status !== "loading") el.classList.remove("dash-skeleton");
+      return;
+    }
+    el.classList.remove("dash-skeleton");
+    const row = el.dataset.row != null ? d.data[+el.dataset.row] : d.data.find((r) => rr.coincide(r, el.dataset.where));
+    const raw = row ? row[el.dataset.field] : null;
+    if (raw == null || raw === "") { el.textContent = "—"; return; }
+    const f = el.dataset.fmt;
+    if (f === "mes") el.textContent = rr.fMes(rr.parse(raw));
+    else if (rr.fmt[f]) el.textContent = rr.fmt[f](+raw);
+    else el.textContent = String(raw);
+  });
+
+  // ---------- Controles ----------
+  function rrSincronizarControles() {
+    const p = dash.params();
+    document.querySelectorAll("select[data-param]").forEach((s) => {
+      const v = p[s.dataset.param]; if (v != null && document.activeElement !== s) s.value = v;
+    });
+    document.querySelectorAll("[data-param-btn]").forEach((b) => {
+      const v = p[b.dataset.paramBtn] ?? "entrenamiento";
+      b.setAttribute("aria-pressed", String(b.dataset.value === v));
+    });
+  }
+  document.querySelectorAll("select[data-param]").forEach((s) => {
+    s.addEventListener("change", () => { window.rrLimite = 20; dash.setParams({ [s.dataset.param]: s.value }); });
+  });
+  document.querySelectorAll("[data-param-btn]").forEach((b) => {
+    b.addEventListener("click", () => dash.setParams({ [b.dataset.paramBtn]: b.dataset.value }));
+  });
+  document.querySelectorAll("#buscar-ticker").forEach((inp) => {
+    inp.addEventListener("input", () => { window.rrBuscar = inp.value.trim().toUpperCase(); window.rrLimite = 20; dash.draw("emp_tabla"); dash.draw("emp_conteo"); });
+  });
+  dash.onData(rrSincronizarControles);
+</script>
+
+<script>
+  // ---------- Gráfico de áreas apiladas ----------
+  window.rrSerieDiaria = function (datos, grupo) {
+    const m = new Map();
+    for (const r of datos) {
+      if (r.grupo !== grupo) continue;
+      let o = m.get(r.fecha);
+      if (!o) { o = { fecha: r.fecha, t: rr.parse(r.fecha), bloque: r.bloque, "Calma": 0, "Impulso": 0, "Estrés": 0 }; m.set(r.fecha, o); }
+      o[r.regimen] = +r.pct;
+    }
+    return [...m.values()].sort((a, b) => a.t - b.t);
+  };
+
+  window.rrEjeX = function (svg, x, alto, ancho) {
+    const n = ancho < 520 ? d3.utcYear.every(2) : d3.utcYear.every(1);
+    svg.append("g").attr("transform", `translate(0,${alto})`)
+      .call(d3.axisBottom(x).ticks(n).tickFormat(rr.fAnio).tickSizeOuter(0));
+  };
+
+  window.rrEtiquetasBloque = function (svg, x, filas) {
+    for (const b of rr.bloques) {
+      const f = filas.filter((r) => r.bloque === b); if (!f.length) continue;
+      svg.append("text").attr("x", (x(f[0].t) + x(f[f.length - 1].t)) / 2).attr("y", -8)
+        .attr("text-anchor", "middle").text(rr.bloquesCortos[b]);
+    }
+  };
+
+  dash.draw("evol", (el) => {
+    const d = dash.data("diario");
+    el.replaceChildren();
+    if (d.status !== "ok") { el.textContent = d.status === "error" ? "No se pudieron cargar los datos diarios." : "—"; return; }
+    const grupo = dash.params().grupo_evol || "entrenamiento";
+    const filas = rrSerieDiaria(d.data, grupo);
+    const W = el.clientWidth || 600, H = W < 520 ? 260 : 320;
+    const m = { t: 24, r: 8, b: 26, l: 40 }, w = W - m.l - m.r, h = H - m.t - m.b;
+    const x = d3.scaleUtc().domain(d3.extent(filas, (r) => r.t)).range([0, w]);
+    const y = d3.scaleLinear().domain([0, 100]).range([h, 0]);
+    const claves = ["Estrés", "Impulso", "Calma"];
+    const root = d3.select(el).append("svg").attr("width", "100%").attr("viewBox", `0 0 ${W} ${H}`)
+      .attr("role", "img").attr("aria-label", `Porcentaje diario de acciones en Calma, Impulso y Estrés, ${rr.nombresGrupo[grupo].toLowerCase()}, 2020 a 2026`);
+    const svg = root.append("g").attr("transform", `translate(${m.l},${m.t})`);
+    svg.append("g").call(d3.axisLeft(y).ticks(5).tickFormat((v) => v + " %").tickSize(-w)).call((g) => g.select(".domain").remove())
+      .call((g) => g.selectAll(".tick line").attr("stroke-opacity", 0.6));
+    const area = d3.area().x((p) => x(p.data.t)).y0((p) => y(p[0])).y1((p) => y(p[1]));
+    for (const b of rr.bloques) {
+      const fb = filas.filter((r) => r.bloque === b); if (!fb.length) continue;
+      const pila = d3.stack().keys(claves)(fb);
+      svg.append("g").selectAll("path").data(pila).join("path")
+        .attr("d", area).style("fill", (s) => rr.colores[s.key])
+        .style("stroke", "var(--color-bg)").style("stroke-width", 1);
+    }
+    rrEjeX(svg, x, h, W);
+    rrEtiquetasBloque(svg, x, filas);
+    const guia = svg.append("line").attr("y1", 0).attr("y2", h).style("stroke", "var(--color-fg)").style("stroke-width", 1).attr("opacity", 0);
+    const tip = rr.tip(el);
+    const bis = d3.bisector((r) => r.t).center;
+    svg.append("rect").attr("width", w).attr("height", h).style("fill", "transparent")
+      .on("pointermove", (ev) => {
+        const [px] = d3.pointer(ev);
+        const r = filas[bis(filas, x.invert(px))]; if (!r) return;
+        guia.attr("x1", x(r.t)).attr("x2", x(r.t)).attr("opacity", 0.6);
+        tip.replaceChildren();
+        const t = document.createElement("div"); t.className = "t"; t.textContent = rr.fDia(r.t) + " · " + rr.bloquesCortos[r.bloque]; tip.appendChild(t);
+        for (const k of ["Calma", "Impulso", "Estrés"]) rr.filaTip(tip, rr.colores[k], k, rr.fmt.pct1(r[k]));
+        const [bx, by] = d3.pointer(ev, el);
+        rr.ponerTip(tip, el, bx, by);
+      })
+      .on("pointerleave", () => { tip.hidden = true; guia.attr("opacity", 0); });
+  });
+
+  // ---------- Tabla de picos ----------
+  dash.draw("picos_tabla", (tb) => {
+    const d = dash.data("picos");
+    tb.replaceChildren();
+    if (d.status !== "ok" || !d.data) {
+      if (d.status === "error") { const tr = tb.insertRow(); const td = tr.insertCell(); td.colSpan = 4; td.textContent = "No se pudo calcular."; }
+      return;
+    }
+    for (const r of d.data) {
+      const tr = tb.insertRow(); tr.dataset.key = encodeURIComponent(r.bloque);
+      tr.insertCell().textContent = rr.nombresBloque[r.bloque];
+      tr.insertCell().textContent = String(r.trimestre).replace("Q", " T");
+      const a = tr.insertCell(); a.className = "n"; a.textContent = rr.fmt.pct1(r.estres_ent);
+      const b = tr.insertCell(); b.className = "n"; b.textContent = rr.fmt.pct1(r.estres_res);
+    }
+  });
+</script>
+
+<script>
+  // ---------- Barras de ARI ----------
+  dash.draw("ari_barras", (el) => {
+    const d = dash.data("estabilidad");
+    el.replaceChildren();
+    if (d.status !== "ok") { el.textContent = d.status === "error" ? "No se pudieron cargar los resultados." : "—"; return; }
+    const filas = d.data.map((r) => { const [g, b] = String(r.celda).split(" / "); return { grupo: g, bloque: b, ari: +r.ari, filas: +r.filas, celda: r.celda }; });
+    const W = el.clientWidth || 400;
+    const m = { t: 4, r: 44, b: 22, l: 110 }, w = W - m.l - m.r;
+    const y0 = d3.scaleBand().domain(rr.bloques).range([0, 3 * 62]).paddingInner(0.28);
+    const y1 = d3.scaleBand().domain(["entrenamiento", "reservada"]).range([0, y0.bandwidth()]).paddingInner(0.12);
+    const h = 3 * 62, H = h + m.t + m.b;
+    const x = d3.scaleLinear().domain([0, 1]).range([0, w]);
+    const root = d3.select(el).append("svg").attr("width", "100%").attr("viewBox", `0 0 ${W} ${H}`)
+      .attr("role", "img").attr("aria-label", "ARI por periodo para empresas de entrenamiento y reservadas");
+    const svg = root.append("g").attr("transform", `translate(${m.l},${m.t})`);
+    svg.append("g").attr("transform", `translate(0,${h})`).call(d3.axisBottom(x).ticks(W < 380 ? 3 : 5).tickFormat((v) => rr.fmt.num1(v)).tickSize(-h))
+      .call((g) => g.select(".domain").remove()).call((g) => g.selectAll(".tick line").attr("stroke-opacity", 0.6));
+    const corto = { entrenamiento: ["2020–2022", "entrenamiento"], validacion: ["2023–2024", "validación"], prueba: ["2025–2026", "prueba"] };
+    for (const b of rr.bloques) {
+      const t = svg.append("text").attr("x", -10).attr("y", y0(b) + y0.bandwidth() / 2 - 2).attr("text-anchor", "end");
+      t.append("tspan").attr("x", -10).text(corto[b][0]);
+      t.append("tspan").attr("x", -10).attr("dy", "1.2em").text(corto[b][1]);
+    }
+    const tip = rr.tip(el);
+    svg.append("g").selectAll("rect").data(filas).join("rect")
+      .attr("x", 0).attr("y", (r) => y0(r.bloque) + y1(r.grupo)).attr("height", y1.bandwidth())
+      .attr("width", (r) => Math.max(0, x(r.ari))).attr("rx", 3)
+      .style("fill", (r) => rr.grupos[r.grupo])
+      .on("pointermove", (ev, r) => {
+        tip.replaceChildren();
+        const t = document.createElement("div"); t.className = "t"; t.textContent = rr.nombresBloque[r.bloque]; tip.appendChild(t);
+        rr.filaTip(tip, rr.grupos[r.grupo], rr.nombresGrupo[r.grupo], "ARI " + rr.fmt.dec2(r.ari));
+        const o = document.createElement("div"); o.className = "t"; o.textContent = rr.fmt.int(r.filas) + " observaciones"; tip.appendChild(o);
+        const [bx, by] = d3.pointer(ev, el); rr.ponerTip(tip, el, bx, by);
+      })
+      .on("pointerleave", () => { tip.hidden = true; });
+    svg.append("g").selectAll("text").data(filas).join("text")
+      .attr("x", (r) => x(r.ari) + 5).attr("y", (r) => y0(r.bloque) + y1(r.grupo) + y1.bandwidth() / 2).attr("dy", "0.35em")
+      .style("fill", "var(--color-fg)").text((r) => rr.fmt.dec2(r.ari));
+  });
+
+  // ---------- Líneas de sincronía (Estrés) ----------
+  dash.draw("sinc_lineas", (el) => {
+    const d = dash.data("diario");
+    el.replaceChildren();
+    if (d.status !== "ok") { el.textContent = d.status === "error" ? "No se pudieron cargar los datos diarios." : "—"; return; }
+    const series = {};
+    for (const g of ["entrenamiento", "reservada"]) series[g] = rrSerieDiaria(d.data, g);
+    const W = el.clientWidth || 400, H = 220;
+    const m = { t: 20, r: 8, b: 26, l: 40 }, w = W - m.l - m.r, h = H - m.t - m.b;
+    const todas = series.entrenamiento;
+    const x = d3.scaleUtc().domain(d3.extent(todas, (r) => r.t)).range([0, w]);
+    const ymax = d3.max(Object.values(series).flat(), (r) => r["Estrés"]);
+    const y = d3.scaleLinear().domain([0, Math.ceil(ymax / 10) * 10]).range([h, 0]);
+    const root = d3.select(el).append("svg").attr("width", "100%").attr("viewBox", `0 0 ${W} ${H}`)
+      .attr("role", "img").attr("aria-label", "Porcentaje diario de acciones en Estrés en los dos grupos de empresas");
+    const svg = root.append("g").attr("transform", `translate(${m.l},${m.t})`);
+    svg.append("g").call(d3.axisLeft(y).ticks(4).tickFormat((v) => v + " %").tickSize(-w)).call((g) => g.select(".domain").remove())
+      .call((g) => g.selectAll(".tick line").attr("stroke-opacity", 0.6));
+    const linea = d3.line().x((r) => x(r.t)).y((r) => y(r["Estrés"]));
+    for (const g of ["entrenamiento", "reservada"]) {
+      for (const b of rr.bloques) {
+        const f = series[g].filter((r) => r.bloque === b); if (!f.length) continue;
+        svg.append("path").datum(f).attr("d", linea).style("fill", "none").style("stroke", rr.grupos[g]).style("stroke-width", 1.5);
+      }
+    }
+    rrEjeX(svg, x, h, W);
+    rrEtiquetasBloque(svg, x, todas);
+    const guia = svg.append("line").attr("y1", 0).attr("y2", h).style("stroke", "var(--color-fg)").attr("opacity", 0);
+    const tip = rr.tip(el);
+    const bis = d3.bisector((r) => r.t).center;
+    const res = new Map(series.reservada.map((r) => [r.fecha, r]));
+    svg.append("rect").attr("width", w).attr("height", h).style("fill", "transparent")
+      .on("pointermove", (ev) => {
+        const [px] = d3.pointer(ev);
+        const r = todas[bis(todas, x.invert(px))]; if (!r) return;
+        const r2 = res.get(r.fecha);
+        guia.attr("x1", x(r.t)).attr("x2", x(r.t)).attr("opacity", 0.6);
+        tip.replaceChildren();
+        const t = document.createElement("div"); t.className = "t"; t.textContent = rr.fDia(r.t) + " · acciones en Estrés"; tip.appendChild(t);
+        rr.filaTip(tip, rr.grupos.entrenamiento, "Entrenamiento", rr.fmt.pct1(r["Estrés"]), true);
+        if (r2) rr.filaTip(tip, rr.grupos.reservada, "Reservadas", rr.fmt.pct1(r2["Estrés"]), true);
+        const [bx, by] = d3.pointer(ev, el); rr.ponerTip(tip, el, bx, by);
+      })
+      .on("pointerleave", () => { tip.hidden = true; guia.attr("opacity", 0); });
+  });
+
+  // ---------- Tabla de correlaciones ----------
+  dash.draw("sinc_tabla", (tb) => {
+    const d = dash.data("sincronia");
+    tb.replaceChildren();
+    if (d.status !== "ok") {
+      if (d.status === "error") { const tr = tb.insertRow(); const td = tr.insertCell(); td.colSpan = 4; td.textContent = "No se pudieron cargar las correlaciones."; }
+      return;
+    }
+    for (const g of ["Calma", "Impulso", "Estrés"]) {
+      const tr = tb.insertRow();
+      const c0 = tr.insertCell();
+      const sw = document.createElement("i"); sw.className = "rr-sw"; sw.style.background = rr.colores[g]; sw.style.marginRight = "8px"; sw.style.verticalAlign = "-1px";
+      c0.append(sw, document.createTextNode(g));
+      for (const b of rr.bloques) {
+        const r = d.data.find((x) => x.regimen === g && x.bloque === b);
+        const td = tr.insertCell(); td.className = "n";
+        td.dataset.source = "sincronia"; td.dataset.field = "correlacion"; td.dataset.where = `regimen=${encodeURIComponent(g)}&bloque=${b}`;
+        td.textContent = r ? rr.fmt.dec2(+r.correlacion) : "—";
+      }
+    }
+  });
+</script>
+
+<script>
+  // ---------- Explorador de empresas ----------
+  window.rrLimite = 20;
+  window.rrBuscar = "";
+  window.rrOrden = { campo: "pct_Estres", dir: -1 };
+
+  dash.draw("sector", (sel) => {
+    const d = dash.data("empresas");
+    const sectores = d.status === "ok" ? [...new Set(d.data.map((r) => r.division_sic).filter(Boolean))].sort((a, b) => a.localeCompare(b, "es")) : [];
+    sel.replaceChildren(new Option("Todos los sectores", ""), ...sectores.map((s) => new Option(s, s)));
+    sel.value = dash.params().sector ?? "";
+    sel.onchange = () => { window.rrLimite = 20; dash.setParams({ sector: sel.value }); };
+  });
+
+  function rrFilasEmpresas() {
+    const d = dash.data("empresas");
+    if (d.status !== "ok") return null;
+    const p = dash.params();
+    const bloque = p.periodo_emp || "prueba", sector = p.sector || "", reg = p.regimen_emp || "", q = window.rrBuscar || "";
+    const filas = d.data.filter((r) => r.bloque === bloque && (!sector || r.division_sic === sector)
+      && (!reg || r.regimen_predominante === reg) && (!q || String(r.ticker).toUpperCase().includes(q)));
+    const { campo, dir } = window.rrOrden;
+    const num = campo.startsWith("pct_");
+    filas.sort((a, b) => num ? dir * (+a[campo] - +b[campo]) : dir * String(a[campo]).localeCompare(String(b[campo]), "es"));
+    return filas;
+  }
+
+  dash.draw("emp_tabla", (tb) => {
+    tb.replaceChildren();
+    const d = dash.data("empresas");
+    if (d.status === "error") { const tr = tb.insertRow(); const td = tr.insertCell(); td.colSpan = 8; td.textContent = "No se pudieron cargar las empresas."; return; }
+    const filas = rrFilasEmpresas(); if (!filas) return;
+    if (!filas.length) { const tr = tb.insertRow(); const td = tr.insertCell(); td.colSpan = 8; td.textContent = "Ninguna empresa cumple los filtros."; return; }
+    for (const r of filas.slice(0, window.rrLimite)) {
+      const tr = tb.insertRow();
+      tr.dataset.key = encodeURIComponent(r.ticker) + "," + encodeURIComponent(r.bloque);
+      tr.insertCell().textContent = r.ticker;
+      tr.insertCell().textContent = r.division_sic || "Sin clasificar";
+      tr.insertCell().textContent = r.grupo === "reservada" ? "Reservada" : "Entrenamiento";
+      for (const k of ["pct_Calma", "pct_Impulso", "pct_Estres"]) { const td = tr.insertCell(); td.className = "n"; td.textContent = rr.fmt.num1(+r[k]); }
+      const tdm = tr.insertCell(); const mini = document.createElement("div"); mini.className = "rr-mini";
+      mini.setAttribute("aria-label", `Calma ${rr.fmt.pct1(+r.pct_Calma)}, Impulso ${rr.fmt.pct1(+r.pct_Impulso)}, Estrés ${rr.fmt.pct1(+r.pct_Estres)}`);
+      for (const [k, c] of [["pct_Calma", "Calma"], ["pct_Impulso", "Impulso"], ["pct_Estres", "Estrés"]]) {
+        const s = document.createElement("span"); s.style.width = (+r[k]) + "%"; s.style.background = rr.colores[c]; mini.appendChild(s);
+      }
+      tdm.appendChild(mini);
+      tr.insertCell().textContent = r.regimen_predominante;
+    }
+  });
+
+  dash.draw("emp_conteo", (el) => {
+    const filas = rrFilasEmpresas();
+    if (!filas) { el.textContent = "—"; return; }
+    const n = Math.min(filas.length, window.rrLimite);
+    el.textContent = filas.length ? `Mostrando ${rr.fmt.int(n)} de ${rr.fmt.int(filas.length)} empresas. Valores en porcentaje de sesiones del periodo.` : "";
+    document.querySelectorAll("#mostrar-mas").forEach((b) => { b.hidden = filas.length <= window.rrLimite; });
+  });
+
+  document.querySelectorAll("#mostrar-mas").forEach((b) => b.addEventListener("click", () => {
+    window.rrLimite += 20; dash.draw("emp_tabla"); dash.draw("emp_conteo");
+  }));
+  document.querySelectorAll("#tabla-empresas th[data-sort]").forEach((th) => th.addEventListener("click", () => {
+    const campo = th.dataset.sort;
+    const o = window.rrOrden;
+    window.rrOrden = { campo, dir: o.campo === campo ? -o.dir : (campo.startsWith("pct_") ? -1 : 1) };
+    document.querySelectorAll("#tabla-empresas th[data-sort]").forEach((t) => {
+      if (t.dataset.sort === campo) t.setAttribute("aria-sort", window.rrOrden.dir < 0 ? "descending" : "ascending");
+      else t.removeAttribute("aria-sort");
+    });
+    dash.draw("emp_tabla"); dash.draw("emp_conteo");
+  }));
+
+  // ---------- Barras por número de grupos ----------
+  dash.draw("k_barras", (el) => {
+    const d = dash.data("seleccion_k");
+    el.replaceChildren();
+    if (d.status !== "ok") { el.textContent = d.status === "error" ? "No se pudieron cargar los resultados." : "—"; return; }
+    const campo = el.dataset.campo;
+    const filas = d.data.map((r) => ({ k: +r.k, v: +r[campo] })).sort((a, b) => a.k - b.k);
+    const W = el.clientWidth || 300, H = 190;
+    const m = { t: 18, r: 6, b: 34, l: 34 }, w = W - m.l - m.r, h = H - m.t - m.b;
+    const x = d3.scaleBand().domain(filas.map((r) => r.k)).range([0, w]).padding(0.3);
+    const y = d3.scaleLinear().domain([0, Math.max(0.1, d3.max(filas, (r) => r.v)) * 1.1]).nice().range([h, 0]);
+    const root = d3.select(el).append("svg").attr("width", "100%").attr("viewBox", `0 0 ${W} ${H}`)
+      .attr("role", "img").attr("aria-label", `${campo === "silueta_ent" ? "Silueta" : "ARI entre periodos"} según el número de grupos, de 2 a 8`);
+    const svg = root.append("g").attr("transform", `translate(${m.l},${m.t})`);
+    svg.append("g").call(d3.axisLeft(y).ticks(4).tickFormat((v) => rr.fmt.num1(v)).tickSize(-w)).call((g) => g.select(".domain").remove())
+      .call((g) => g.selectAll(".tick line").attr("stroke-opacity", 0.6));
+    svg.append("g").attr("transform", `translate(0,${h})`).call(d3.axisBottom(x).tickSizeOuter(0));
+    svg.append("text").attr("x", w / 2).attr("y", h + 30).attr("text-anchor", "middle").text("Número de grupos (k)");
+    const tip = rr.tip(el);
+    svg.append("g").selectAll("rect").data(filas).join("rect")
+      .attr("x", (r) => x(r.k)).attr("width", x.bandwidth()).attr("y", (r) => y(r.v)).attr("height", (r) => Math.max(0, h - y(r.v))).attr("rx", 3)
+      .style("fill", (r) => r.k === 3 ? "#1F7DB5" : "var(--cds-chart-muted)")
+      .on("pointermove", (ev, r) => {
+        tip.replaceChildren();
+        const t = document.createElement("div"); t.className = "t"; t.textContent = `k = ${r.k}`; tip.appendChild(t);
+        rr.filaTip(tip, r.k === 3 ? "#1F7DB5" : "var(--cds-chart-muted)", campo === "silueta_ent" ? "Silueta" : "ARI", rr.fmt.dec2(r.v));
+        const [bx, by] = d3.pointer(ev, el); rr.ponerTip(tip, el, bx, by);
+      })
+      .on("pointerleave", () => { tip.hidden = true; });
+    svg.append("g").selectAll("text").data(filas.filter((r) => r.k === 3 || r.k === 2)).join("text")
+      .attr("x", (r) => x(r.k) + x.bandwidth() / 2).attr("y", (r) => y(r.v) - 5).attr("text-anchor", "middle")
+      .style("fill", "var(--color-fg)").text((r) => rr.fmt.dec2(r.v));
+  });
+</script>
+
+</div>
+</body>
+</html>
